@@ -1,10 +1,11 @@
 #!/bin/bash
-
+_changed=0
 # GET OPTIONS
-while getopts "v:f:h" _option; do
+while getopts "v:f:hu" _option; do
     case "$_option" in
         f)  [ "$OPTARG" != "" ] && _configfile="$OPTARG";;
         v)  [ "$OPTARG" != "" ] && _verbosity_override=$OPTARG;;
+        u)  _changed=1;;
         *)
             cat << EOF
 Usage:
@@ -15,7 +16,8 @@ Help Options:
 
 Application Options:
   -f CONFIGFILE                 Specify an alternative configuration file (instead of /etc/hostsblock/hostsblock.conf)
-  -v VERBOSITY                  Specify how much information hostsblock provides (0=only fatal errors to 3=the kitchen sink)
+  -v VERBOSITY                  Specify how much information hostsblock provides (0=only fatal errors to 5=the kitchen sink)
+  -u                            Force hostsblock to update its target file, even if no changes to source files are found
 EOF
             exit 1
         ;;
@@ -38,10 +40,9 @@ _source_configfile
 _verbosity_check
 _set_subprocess_verbosity
 _check_root
-_check_depends mv cp rm curl grep sed tr cut mkdir
+_check_depends mv cp rm curl grep sed tr cut mkdir file
 _check_unzip
 _check_7z
-_detect_dnscacher
 
 # IDENTIFY WHAT WILL not BE OUR REDIRECTION URL
 if [ "$redirecturl" == "127.0.0.1" ]; then
@@ -60,7 +61,6 @@ else
 fi
 
 # DOWNLOAD BLOCKLISTS
-_changed=0
 _notify 3 "Checking blocklists for updates..."
 for _url in ${blocklists[*]}; do
     _outfile=$(echo $_url | sed "s|http:\/\/||g" | tr '/%&+?=' '.')
@@ -77,7 +77,7 @@ for _url in ${blocklists[*]}; do
         _notify 4 "Cache file $cachedir/$_outfile for blocklist $_url not found. It will be downloaded."
     fi
     _notify 4 "Checking and, if needed, downloading blocklist $_url to $cachedir/$_outfile"
-    if curl $_v_curl --compressed --connect-timeout $connect_timeout --retry $retry -z "$cachedir"/"$_outfile" "$_url" -o "$cachedir"/"$_outfile"; then
+    if curl -A 'Mozilla/5.0 (X11; Linux x86_64; rv:30.0) Gecko/20100101 Firefox/30.0' -e http://forum.xda-developers.com/ $_v_curl --compressed -L --connect-timeout $connect_timeout --retry $retry -z "$cachedir"/"$_outfile" "$_url" -o "$cachedir"/"$_outfile"; then
         _notify 3 "Refreshed blocklist $_url."
         _new_ls=$(ls -l "$cachedir"/"$_outfile")
         if [ "$_old_ls" != "$_new_ls" ]; then
@@ -130,8 +130,28 @@ if [ $_changed != 0 ]; then
                 fi
             ;;
             *)
-                _notify 4 "$_basename_cachefile is a plaintext file. No extractor needed."
-                _decompresser="none"
+                _notify 4 "$_basename_cachefile has an ambiguous suffix. Inspecting it for its filetype..."
+                _cachefile_type=$(file -bi "$_cachefile")
+                if [[ "$_cachefile_type" = *'application/zip'* ]]; then
+                    if [ $_unzip_available != 0 ]; then
+                        _notify 4 "$_basename_cachefile is a zip archive. Will use unzip to extract it..."
+                        _decompresser="unzip"
+                    else
+                        _notify 1 "$_basename_cachefile is a zip archive, but an extractor is NOT FOUND. Skipping..."
+                        continue
+                    fi
+                elif [[ "$_cachefile_type" = *'application/x-7z-compressed'* ]]; then
+                    if [ $_7zip_available != 0 ]; then
+                        _notify 4 "$_basename_cachefile is a 7z archive. Will use $_7zip_available to extract it..."
+                        _decompresser="7z"
+                    else
+                        _notify 1 "$_basename_cachefile is a 7z archive, but an extractor is NOT FOUND. Skipping..."
+                        continue
+                    fi
+                else
+                    _notify 4 "$_basename_cachefile is a plaintext file. No extractor needed."
+                    _decompresser="none"
+                fi
             ;;
         esac
         _extract_entries &
@@ -153,7 +173,7 @@ if [ $_changed != 0 ]; then
 
     # PROCESS AND WRITE BLOCK ENTRIES TO FILE
     _notify 3 "Compiling block entries into $hostsfile..."
-    if grep -IhE -- "^$redirecturl" "$tmpdir"/hostsblock/hosts.block.d/* | tee "$annotate" | sed "s/ \!.*$//g" |\
+    if grep -ahE -- "^$redirecturl" "$tmpdir"/hostsblock/hosts.block.d/* | tee "$annotate".tmp | sed "s/ \!.*$//g" |\
         sort -u >> "$hostsfile"; then
         _notify 3 "Compiled block entries into $hostsfile."
     else
@@ -164,9 +184,9 @@ if [ $_changed != 0 ]; then
     # PROCESS AND WRITE REDIRECT ENTRIES TO FILE
     if [ $redirects == 1 ] || [ "$redirects" == "1" ]; then
         _notify 3 "Compiling redirect entries into $hostsfile..."
-        if grep -IhEv -- "^$redirecturl" "$tmpdir"/hostsblock/hosts.block.d/* |\
-          grep -Ih -- "^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" | tee -a "$annotate" |\
-          sed "s/ \!.*$//g" | sort -u | grep -vf "$whilelist"  >> "$hostsfile"; then
+        if grep -ahEv -- "^$redirecturl" "$tmpdir"/hostsblock/hosts.block.d/* |\
+          grep -ah -- "^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" | tee -a "$annotate".tmp |\
+          sed "s/ \!.*$//g" | sort -u | grep -vf "$whitelist"  >> "$hostsfile"; then
             _notify 3 "Compiled redirect entries into $hostsfile."
         else
             _notify 1 "FAILED to compile redirect entries into $hostsfile."
@@ -177,13 +197,24 @@ if [ $_changed != 0 ]; then
 
     # APPEND BLACKLIST ENTRIES
     _notify 3 "Appending blacklisted entries to $hostsfile..."
-    cat "$blacklist" | sed "s|^|$redirecturl |g" >> "$hostsfile" && _notify 3 "Appended blacklisted entries to $hostsfile." || \
+    while read _blacklistline; do
+        echo "$redirecturl $_blacklistline \! $blacklist" >> "$annotate".tmp
+        grep -q "$_blacklistline" "$hostsfile" || echo "$redirecturl $_blacklistline" >> "$hostsfile"
+    done < "$blacklist" && _notify 3 "Appended blacklisted entries to $hostsfile." || \
       _notify 1 "FAILED to append blacklisted entries to $hostsfile."
 
-    _notify 4 "Appending blacklisted entries to $annotate..."
-    cat "$blacklist" | sed -e "s|^|$redirecturl |g" -e "s|$| \# $blacklist|g" >> "$annotate" && \
-      _notify 4 "Appended blacklisted entries to $annotate." || \
-      _notify 1 "FAILED to append blacklisted entries to $annotate."
+    # SORT AND, IF REQUESTED, COMPRESS ANNOTATION FILE.
+    case "$annotate" in
+        *.gz)
+            which pigz &>/dev/null && \
+              sort -u "$annotate".tmp | pigz -c - > "$annotate" || \
+              sort -u "$annotate".tmp | gzip -c - > "$annotate"
+        ;;
+        *)
+            sort -u "$annotate".tmp > "$annotate"
+        ;;
+    esac
+    [ -f "$annotate" ] && rm -f "$_v" -- "$annotate".tmp
 
     # REPORT COUNT OF MODIFIED OR BLOCKED URLS
     [ $verbosity -ge 3 ] && _count_hosts "$hostsfile"
@@ -196,18 +227,8 @@ if [ $_changed != 0 ]; then
         postprocess &>/dev/null && _notify 3 "Postprocessing completed." || _notify 1 "Postprocessing FAILED."
     fi
 
-    # IF WE HAVE A DNS CACHER, LET'S RESTART IT
-    if [ "$dnscacher" != "none" ]; then
-        _notify 3 "Restarting $dnscacher..."
-        if [ $verbosity -ge 5 ]; then
-            _dnscacher && _notify 3 "Restarted $dnscacher." || _notify 1 "FAILED to restart $dnscacher."
-        else
-            _dnscacher &>/dev/null && _notify 3 "Restarted $dnscacher." || _notify 1 "FAILED to restart $dnscacher."
-        fi
-    fi
-
     # CLEAN UP
-    _notify 4 "Cleaing up temporary directory $tmpdir/hostsblock..."
+    _notify 4 "Cleaning up temporary directory $tmpdir/hostsblock..."
     rm $_v -r -- "$tmpdir"/hostsblock && _notify 2 "Cleaned up $tmpdir/hostsblock." || _notify 1 "FAILED to clean up $tmpdir/hostsblock."
     _notify 3 "DONE."
 else

@@ -42,21 +42,26 @@ _check_depends curl grep sed tr
 _source_configfile
 _verbosity_check
 _set_subprocess_verbosity
-_detect_dnscacher
 
 # MAIN ROUTINE
 _changed=0
-_notify 0 "Checking to see if url is blocked or unblocked..."
+echo "Checking to see if url is blocked or unblocked..."
 _check_url $(echo "$@" | sed -e "s/.*https*:\/\///g" -e "s/[\/?'\" :<>\(\)].*//g")
-[ $_changed == 1 ] && postprocess &>/dev/null
+if [ $_changed == 1 ]; then
+    if [ $verbosity -ge 5 ]; then
+        postprocess
+    else
+        postprocess &>/dev/null
+    fi
+fi
 read -p "Page domain verified. Scan the whole page for other domains for (un)blocking? [y/N] " a
 if [[ $a == "y" || $a == "Y" ]]; then
-    for LINE in `curl --location-trusted -s "$@" | tr ' ' '\n' | grep "https*:\/\/" | sed -e "s/.*https*:\/\/\(.*\)$/\1/g" -e "s/\//\n/g" | grep "\." |\
+    for LINE in `curl -L --location-trusted -s "$@" | tr ' ' '\n' | grep "https*:\/\/" | sed -e "s/.*https*:\/\/\(.*\)$/\1/g" -e "s/\//\n/g" | grep "\." |\
       grep -v "\"" | grep -v ")" | grep -v "(" | grep -v "\&" | grep -v "\?" | grep -v "<" | grep -v ">" | grep -v "'" | grep -v "_" |\
       grep -v "\.php$" | grep -v "\.html*$" | grep "[a-z]$" | sort -u | tr "\n" " "`; do
         _check_url "$LINE"
     done
-    _notify 0 "Whole-page scan completed."
+    echo "Whole-page scan completed."
 fi
 
 if [ $_changed == 1 ]; then

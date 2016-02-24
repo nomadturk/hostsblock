@@ -10,8 +10,16 @@
 ### Level 5: Level 4 + stdout/stderr from sub-processes like curl, zip, 7za, etc.
 
 _notify() {
+    case $1 in
+        0) _level="[FATAL]" ;;
+        1) _level="[WARN]" ;;
+        2) _level="[NOTE]" ;;
+        3) _level="[INFO]" ;;
+        4) _level="[DETAIL]" ;;
+        5) _level="[DEBUG]" ;;
+    esac
     if [ $verbosity -ge $1 ]; then
-        echo "$2"
+        echo -e "${_level} $2"
     else
         true
     fi
@@ -19,9 +27,9 @@ _notify() {
 
 ## Report counts of addresses from a given hosts-like file
 _count_hosts() {
-    grep -Ih -- "^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" "$@" | cut -d" " -f1 | sort -u | while read _addr; do
+    grep -ah -- "^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" "$@" | cut -d" " -f1 | sort -u | while read _addr; do
         _number=$(grep -c -- "^$_addr" "$@")
-        echo "$@: $_number urls redirected to $_addr."
+        _notify 3 "$@: $_number urls redirected to $_addr."
     done
 }
 
@@ -29,7 +37,7 @@ _count_hosts() {
 _backup_old() {
     if [ $recycle_old == 1 ] || [ "$recycle_old" == "1" ] || [ "$recycle_old" == "yes" ] || [ "$recycle_old" == "true" ]; then
         _notify 3 "Recycling old $hostsfile into new version..."
-        cp $_v -f -- "$hostsfile" "$tmpdir"/hostsblock/hosts.block.d/hosts.block.old && \
+        sort -u "$hostsfile" | sed "s|$| ! /etc/hosts.block.old|g" > "$tmpdir"/hostsblock/hosts.block.d/hosts.block.old && \
           _notify 3 "Recycled old $hostsfile into new version." || \
           _notify 1 "FAILED to recycle old $hostsfile into new version."
     else
@@ -56,23 +64,23 @@ _extract_entries() {
     _notify 4 "Extracting entries from $_cachefile..."
     [ -d "$_cachefile_dir" ] || mkdir $_v -- "$_cachefile_dir" && \
       _notify 4 "Created directory $_cachefile_dir." || _notify 1 "FAILED to create directory $_cachefile_dir." 
-    cp $_v -- "$_cachefile" "$_cachefile_dir"/ && _notify 4 "Moved $_basename_cachefile to $_cachefile_dir." || \
-      _notify 1 "FAILED to move $_basename_cachefile to $_cachefile_dir."
     cd "$_cachefile_dir"
     case "$_decompresser" in
         none)
             _compress_exit=0
             _notify 4 "No need to decompress $_basename_cachefile."
+            cp $_v -- "$_cachefile" "$_cachefile_dir"/ && _notify 4 "Moved $_basename_cachefile to $_cachefile_dir." || \
+              _notify 1 "FAILED to move $_basename_cachefile to $_cachefile_dir."
         ;;
         unzip)
-            unzip -B -o -j $_v_unzip -- "$_basename_cachefile" && _compress_exit=0 || _compress_exit=1
+            unzip -B -o -j $_v_unzip -- "$_cachefile" && _compress_exit=0 || _compress_exit=1
             [ $_compress_exit == 0 ] && _notify 3 "Unzipped $_basename_cachefile." || _notify 1 "FAILED to unzip $_basename_cachefile."
         ;;
         7z*)
             if [ $verbosity -le 4 ]; then
-                eval $_7zip_available e "$_basename_cachefile" &>/dev/null && _compress_exit=0 || _compress_exit=1
+                eval $_7zip_available e "$_cachefile" &>/dev/null && _compress_exit=0 || _compress_exit=1
             else
-                eval $_7zip_available e "$_basename_cachefile" && _compress_exit=0 || _compress_exit=1
+                eval $_7zip_available e "$_cachefile" && _compress_exit=0 || _compress_exit=1
             fi
             [ $_compress_exit == 0 ] && _notify 3 "Un7zipped $_basename_cachefile." || _notify 1 "FAILED to un7zip $_basename_cachefile."
         ;;
@@ -80,9 +88,9 @@ _extract_entries() {
     if [ $_compress_exit == 0 ]; then
         _target_hostsfile="$tmpdir/hostsblock/hosts.block.d/$_basename_cachefile.hosts"
         _notify 4 "Extracting obvious entries from $_basename_cachefile..."
-        _cachefile_url=$(cat "$cachedir"/"$_basename_cachefile".url | head -n1)
-        if grep -rIh -- "^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" ./* | sed -e 's/[[:space:]][[:space:]]*/ /g' -e \
-          "s/\#.*//g" -e "s/[[:space:]]$//g" -e "s/$_notredirect/$redirecturl/g" | sort -u | grep -vf "$whilelist" | \
+        _cachefile_url=$(head -n1 "$cachedir"/"$_basename_cachefile".url)
+        if grep -rah -- "^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" ./* | sed -e 's/[[:space:]][[:space:]]*/ /g' -e \
+          "s/\#.*//g" -e "s/[[:space:]]$//g" -e "s/$_notredirect/$redirecturl/g" | sort -u | grep -vf "$whitelist" | \
            sed "s|$| \! $_cachefile_url|g" > "$_target_hostsfile"; then
             _notify 4 "Extracted obvious entries from $_basename_cachefile."
             if [ $verbosity -ge 4 ]; then
@@ -92,9 +100,9 @@ _extract_entries() {
             _notify 1 "FAILED to extract any obvious entries from $_basename_cachefile."
         fi
         _notify 4 "Extracting less-obvious entries from $_basename_cachefile"
-        if grep -rIhv "^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" ./* | grep -v "^\." | grep -v "\.$" | grep -v "\*" |\
+        if grep -rahv "^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" ./* | grep -v "^\." | grep -v "\.$" | grep -v "\*" |\
           grep -v "\"" | grep -v "\$" | grep "[a-z]" | grep "\." | sed "s/^/$redirecturl /g" | sed -e 's/[[:space:]][[:space:]]*/ /g' \
-          -e "s/\#.*//g" -e "s/[[:space:]]$//g" | sort -u | grep -vf "$whilelist" | sed "s|$| \! $_cachefile_url|g" |\
+          -e "s/\#.*//g" -e "s/[[:space:]]$//g" | sort -u | grep -vf "$whitelist" | sed "s|$| \! $_cachefile_url|g" |\
            >> "$_target_hostsfile"; then
             _notify 4 "Extracted less-obvious entries from $_basename_cachefile."
             if [ $verbosity -ge 4 ]; then
@@ -202,27 +210,45 @@ _source_configfile() {
 
 # REWRITE A GIVEN FILE SANS REGEX STATEMENT
 _strip_entries() {
-    grep -v "$1" "$2" > "$2".tmp && \
-      mv $_v -f -- "$2".tmp "$2"
+    case "$2" in
+        *.gz)
+            which pigz &>/dev/null && \
+              pigz -dc "$2" | grep -v "$1" | pigz -c - > "$2".tmp || \
+              gzip -dc "$2" | grep -v "$1" | gzip -c - > "$2".tmp
+        ;;
+        *)
+            grep -v "$1" "$2" > "$2".tmp && \
+                mv $_v -f -- "$2".tmp "$2"
+        ;;
+    esac
 }
 
 
 # CHECK TO SEE IF GIVEN URL IS BLOCKED OR UNBLOCKED AND OFFER TO CHANGE THIS.
 _check_url(){
     _url_escaped=$(echo "$@" | sed "s/\./\\\./g")
-    _matches=$(grep " $_url_escaped " "$annotate")
+    case "$annotate" in
+        *.gz)
+            which pigz &>/dev/null && \
+              _matches=$(pigz -dc "$annotate" | grep " $_url_escaped ") || \
+              _matches=$(gzip -dc "$annotate" | grep " $_url_escaped ")
+        ;;
+        *)
+            _matches=$(grep " $_url_escaped " "$annotate")
+        ;;
+    esac
     _block_matches=$(echo "$_matches" | grep -- "^$redirecturl" | sed "s/.* \!\(.*\)$/\1/g" | tr '\n' ',' | sed "s/,$//g")
     _redirect_matches=$(echo "$_matches" | grep -v "^$redirecturl" | \
       sed "s/^\([0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\) .* \! \(.*\)$/to \1 by blocklist \2/g" | tr '\n' ',' | sed "s/,$//g")
     if [ $(echo "$_block_matches" | wc -w) -gt 0 ] || [ $(echo "$_redirect_matches" | wc -w) -gt 0 ]; then
         [ $(echo "$_block_matches" | wc -w) -gt 0 ] && echo -e "\n'$@' \e[1;31mBLOCKED \e[0mby blocklist(s)${_block_matches}"
         [ $(echo "$_redirect_matches" | wc -w) -gt 0 ] && echo -e "\n'$@' \e[1;33mREDIRECTED \e[0m$_redirect_matches" 
-        echo -e "    1) Unblock/unredirect just $@\n    2) Unblock/unredirect all sites containing url $@\n    3) Keep blocked/redirected"
+        echo -e "\t1) Unblock/unredirect just $@\n\t2) Unblock/unredirect all sites containing url $@\n\t3) Keep blocked/redirected"
         read -p "1-3 (default: 3): " b
         if [[ $b == 1 || "$b" == "1" ]]; then
             echo "Unblocking just $@"
-            echo " $@ " >> "$whitelist"
-            _strip_entries " $@$" "$annotate"
+            echo " $@" >> "$whitelist"
+            _strip_entries " $@ \!" "$annotate"
             _strip_entries " $@$" "$blacklist"
             _strip_entries " $@$" "$hostsfile"
             _changed=1
@@ -235,12 +261,28 @@ _check_url(){
             _changed=1
         fi
     else
-        echo -e "\n'$@' \e[0;32mNOT BLOCKED/REDIRECTED\e[0m\n    1) Block $@\n    2) Block $@ and delete all whitelist url entries containing $@\n    3) Keep unblocked (default)"
+        echo -e "\n'$@' \e[0;32mNOT BLOCKED/REDIRECTED\e[0m\n\t1) Block $@\n\t2) Block $@ and delete all whitelist url entries containing $@\n\t3) Keep unblocked (default)"
         read -p "1-3 (default: 3): " c
         if [[ $c == 1 || "$c" == "1" ]]; then
             echo "Blocking $@"
             echo "$@" >> "$blacklist"
-            echo "$redirecturl $@ \! $blacklist" >> "$annotate" &
+            case "$annotate" in
+                *.gz)
+                    if which pigz &>/dev/null; then
+                        pigz -dc "$annotate" > "$annotate".tmp
+                        echo "$redirecturl $@ \! $blacklist" >> "$annotate".tmp
+                        sort -u "$annotate".tmp | pigz -c - > "$annotate"
+                    else
+                        gzip -dc "$annotate" > "$annotate".tmp
+                        echo "$redirecturl $@ \! $blacklist" >> "$annotate".tmp
+                        sort -u "$annotate".tmp | gzip -c - > "$annotate"
+                    fi
+                    rm -f "$_v" -- "$annotate".tmp
+                ;;
+                *)
+                    echo "$redirecturl $@ \! $blacklist" >> "$annotate"
+                ;;
+            esac &
             _strip_entries "^$@$" "$whitelist" &
             echo "$redirecturl $@" >> "$hostsfile" &
             _changed=1
@@ -248,7 +290,23 @@ _check_url(){
         elif [[ $c == 2 || "$c" == "2" ]]; then
             echo "Blocking $@ and deleting all whitelist url entries containing $@"
             echo "$@" >> "$blacklist" &
-            echo "$redirecturl $@ \! $blacklist" >> "$annotate" &
+            case "$annotate" in
+                *.gz)
+                    if which pigz &>/dev/null; then
+                        pigz -dc "$annotate" > "$annotate".tmp
+                        echo "$redirecturl $@ \! $blacklist" >> "$annotate".tmp
+                        sort -u "$annotate".tmp | pigz -c - > "$annotate"
+                    else
+                        gzip -dc "$annotate" > "$annotate".tmp
+                        echo "$redirecturl $@ \! $blacklist" >> "$annotate".tmp
+                        sort -u "$annotate".tmp | gzip -c - > "$annotate"
+                    fi
+                    rm -f "$_v" -- "$annotate".tmp
+                ;;
+                *)
+                    echo "$redirecturl $@ \! $blacklist" >> "$annotate"
+                ;;
+            esac &
             _strip_entries "$@" "$whitelist" &
             echo "$redirecturl $@" >> "$hostsfile" &
             _changed=1
@@ -256,131 +314,17 @@ _check_url(){
     fi
 }
 
-_check_dhcpcd_config() {
-    if [ -f /etc/resolv.conf.head ] && grep -v -- "^\#" /etc/resolv.conf.head | grep -- "nameserver" | grep -q -- "127\.0\.0\.1"; then
-        _notify 4 "/etc/resolv.conf.head exists and is properly configured."
-        _notify 4 "DHCPCD configured correctly."
-        true
-    else
-        _notify 3 "/etc/resolv.conf.head does NOT exist or does NOT have the correct entry."
-        _notify 4 "Please add 'nameserver 127.0.0.1' to /etc/resolv.conf.head to correct the last error."
-        _notify 3 "DHCPCD incorrectly configured."
-        false
-    fi
-}
-
-_check_dhclient_config() {
-    if [ -f /etc/dhclient.conf ] && grep -v -- "^\#" /etc/dhclient.conf | grep -- "prepend" | grep -q -- "127\.0\.0\.1"; then
-        _notify 4 "/etc/dhclient.conf exists and is properly configured."
-        _notify 3 "DHCLIENT configured correctly."
-        true
-    else
-        _notify 3 "/etc/dhclient.conf does NOT exist or does NOT have the correct entry."
-        _notify 4 "Please add 'prepend domain-name-servers 127.0.0.1;' to /etc/dhclient.conf to correct the last error."
-        _notify 3 "DHCLIENT incorrectly configured."
-        false
-    fi
-}
-
-_detect_dhcp_client() {
-    if pidof dhcpcd &>/dev/null && _check_dhcpcd_config; then
-        _notify 4 "DHCPCD found and properly configured."
-        _dhcp_client=dhcpcd
-    elif pidof dhclient &>/dev/null && _check_dhclient_config; then
-        _notify 4 "DHCLIENT found and properly configured."
-        _dhcp_client=dhclient
-    else
-        _notify 0 "DHCP CLIENT NOT FOUND OR NOT OPERATIONAL. EXITING..."
-        exit 1
-    fi
-}
-
-_check_dnsmasq_config() {
-    _dnsmasq_config_correct=1
-    _dnsmasq_ps=$(ps -eo comm,args | grep -- "^[d]nsmasq")
-    if echo "$_dnsmasq_ps" | grep -q -- " -C | --config-file="; then
-        _dnsmasq_config_file_tmp=$(echo "$_dnsmasq_ps" | grep -- " -C | --config-file=" | sed -e "s/.* -C \(.*\)[ $]/\1/g" -e \
-          "s/.* --config-file=\(.*\)[ $]/\1/g")
-        _dnsmasq_config_file="${dnsmasq_config_file_tmp%%[ $]*}"
-    else
-        _dnsmasq_config_file="/etc/dnsmasq.conf"
-    fi
-    _notify 4 "Detected $_dnsmasq_config_file as DNSMASQ's configuration file."
-    if grep -v -- "^\#" "$_dnsmasq_config_file" | grep -q -- "addn-hosts=$hostsfile"; then
-        _notify 4 "DNSMASQ has correct 'addn-hosts' entry."
-    else
-        _notify 3 "DNSMASQ does NOT have the correct 'addn-hosts' entry."
-        _notify 4 "Please add 'addn-hosts=$hostsfile' to $_dnsmasq_config_file to correct the last error."
-        _dnsmasq_config_correct=0
-    fi
-    if grep -v -- "^\#" "$_dnsmasq_config_file" | grep -q -- "listen-address=127.0.0.1"; then
-        _notify 4 "DNSMASQ has correct 'listen-address' entry."
-    else
-        _notify 3 "DNSMASQ does NOT have the correct 'listen-address' entry."
-        _notify 4 "Please add 'listen-address=127.0.0.1' to $_dnsmasq_config_file to correct the last error."
-        _dnsmasq_config_correct=0
-    fi
-    if [ $_dnsmasq_config_correct == 1 ]; then
-        _notify 4 "DNSMASQ configured correctly."
-        _dnscacher() {
-            pkill -HUP -- dnsmasq
-        }
-        true
-    else
-        _notify 3 "DNSMASQ incorrectly configured."
-        false
-   fi
-}
-
-_detect_dnscacher() {
-    case $dnscacher in
-        *none*)
-            if [ "$hostsfile" == "/etc/hosts" ]; then
-                _notify 4 "Using NO dnscacher."
-            else
-                _notify 0 "USING no DNSCACHER, BUT THE 'hostsfile' VARIABLE IS NOT SET TO /etc/hosts."
-                _notify 0 "YOU MISCONFIGURED hostsblock."
-                _notify 0 "IF YOU THINK YOU GOT THIS MESSAGE IN ERROR, TRY 'manual' AS YOUR 'dnscacher' ENTRY."
-                _notify 0 "EXITING..."
-                exit 1
-            fi
-        ;;
-        *dnsmasq*)
-            if _check_dnsmasq_config && _detect_dhcp_client; then
-                _notify 4 "Using DNSMASQ and $_dhcp_client..."
-            else
-                _notify 0 "DNSMASQ AND/OR THE DHCP CLIENT ARE NOT CONFIGURED CORRECTLY. EXITING..."
-                exit 1
-            fi
-        ;;
-        *manual*)
-            _notify 4 "Using manual configuration of dnscacher (see the postprocess entry in $configfile)"
-        ;;
-        *auto*)
-            _notify 3 "Auto-detecting dnscaching settings..."
-            if _check_dnsmasq_config && _detect_dhcp_client; then
-                _notify 4 "Using DNSMASQ and $_dhcp_client..."
-            elif [ "$hostsfile" == "/etc/hosts" ]; then
-                _notify 4 "Using NO dnscacher."
-            else
-                _notify 0 "NO VIABLE DNSCACHER CONFIGURATION FOUND. EXITING..."
-                exit 1
-            fi
-        ;;
-    esac
-}
-
 # SET DEFAULT SETTINGS
 export tmpdir="/dev/shm"
 export hostsfile="/etc/hosts"
 export redirecturl="127.0.0.1"
-export dnscacher="none"
+export dnscacher="auto"
 postprocess() {
      /bin/true
 }
 export blocklists=("http://support.it-mate.co.uk/downloads/HOSTS.txt")
 export blacklist="/etc/hostsblock/black.list"
-export whilelist="/etc/hostsblock/white.list"
+export whitelist="/etc/hostsblock/white.list"
 export hostshead="0"
 export cachedir="/var/cache/hostsblock"
 export redirects="0"
@@ -395,4 +339,4 @@ else
 fi
 export recycle_old=1
 export verbosity=1
-export annotate=/var/lib/hostsblock.db
+export annotate=/var/lib/hostsblock.db.gz
